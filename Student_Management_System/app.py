@@ -22,6 +22,13 @@ import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from base64 import b64decode
+import sys
+
+# Add zero_trust_vpn to path for logger import
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "zero_trust_vpn"))
+import logger
 
 # Load environment variables from .env (must match vpn_server.py)
 load_dotenv()
@@ -385,11 +392,6 @@ def close_db(error):
 # =============================================================================
 # LOGGING UTILITIES
 # =============================================================================
-def log_action(action):
-    os.makedirs("logs", exist_ok=True)
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now()} | {action}\n")
-
 def write_access_log(conn, user_id, action, resource, resource_id, allowed, reason):
     ip = request.remote_addr or ""
     ua = request.headers.get('User-Agent', '')
@@ -398,6 +400,68 @@ def write_access_log(conn, user_id, action, resource, resource_id, allowed, reas
         (user_id, action, resource, resource_id, int(bool(allowed)), reason, ip, ua, datetime.utcnow().isoformat())
     )
     conn.commit()
+    conn.commit()
+
+# =============================================================================
+# SECURE LOG DECRYPTION FOR ADMIN
+# =============================================================================
+def get_decrypted_log_entries(log_type="session", limit=100):
+    """Decrypts and returns entries from the specified secure log file."""
+    log_paths = {
+        "session": logger.SESSION_LOG,
+        "security": logger.SECURITY_LOG,
+        "error": logger.ERROR_LOG
+    }
+    filepath = log_paths.get(log_type)
+    if not filepath or not os.path.exists(filepath):
+        return []
+
+    # Get log key
+    try:
+        with open(logger.LOG_KEY_PATH, "rb") as f:
+            log_key = f.read()
+        aesgcm = AESGCM(log_key)
+    except:
+        return [{"timestamp": "ERROR", "message": "Log key not found or invalid"}]
+
+    entries = []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            # Most recent first
+            for line in reversed(lines):
+                if len(entries) >= limit:
+                    break
+                
+                line = line.strip()
+                if not line: continue
+                
+                try:
+                    # Encrypted JSON format
+                    data = json.loads(line)
+                    nonce = b64decode(data["nonce"])
+                    ciphertext = b64decode(data["data"])
+                    decrypted = aesgcm.decrypt(nonce, ciphertext, None).decode("utf-8")
+                    
+                    # Split SEQ and Message if present
+                    if " | " in decrypted:
+                        parts = decrypted.split(" | ", 1)
+                        # parts[0] is SEQ=x, parts[1] is the actual log string
+                        entries.append({"encrypted": True, "content": parts[1], "seq": parts[0]})
+                    else:
+                        entries.append({"encrypted": True, "content": decrypted})
+                except:
+                    # Legacy plaintext format
+                    entries.append({"encrypted": False, "content": line})
+    except Exception as e:
+        entries.append({"content": f"Error reading log: {str(e)}"})
+    
+    return entries
+
+def log_action(action):
+    """Updated to use the secure encrypted logger."""
+    username = session.get("username", "system")
+    logger.log_event(username, "WEB_PORTAL_ACTION", "INFO", action)
 
 # =============================================================================
 # SECURITY UTILITIES
@@ -2301,13 +2365,19 @@ def admin_handle_request(request_id, action):
 @login_required
 @role_required(['admin'])
 def admin_logs():
-    conn = get_db()
-    logs = conn.execute("""SELECT al.*, u.username FROM access_logs al 
-                          LEFT JOIN users u ON al.user_id=u.id 
-                          ORDER BY al.timestamp DESC LIMIT 200""").fetchall()
+    log_type = request.args.get('type', 'session')
     
-    track_behavior("admin_logs")
-    return render_template("admin/logs.html", logs=logs, trust_score=session.get("trust_score", 100))
+    if log_type == 'database':
+        conn = get_db()
+        logs = conn.execute("""SELECT al.*, u.username FROM access_logs al 
+                              LEFT JOIN users u ON al.user_id=u.id 
+                              ORDER BY al.timestamp DESC LIMIT 200""").fetchall()
+        return render_template("admin/logs.html", logs=logs, type='database', trust_score=session.get("trust_score", 100))
+    else:
+        # Fetch from encrypted files
+        entries = get_decrypted_log_entries(log_type)
+        track_behavior("admin_logs_secure")
+        return render_template("admin/logs.html", decrypted_logs=entries, type=log_type, trust_score=session.get("trust_score", 100))
 
 @app.route('/admin/grievances')
 @login_required

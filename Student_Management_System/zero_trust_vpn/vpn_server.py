@@ -9,10 +9,13 @@ import jwt
 import threading
 import os
 import sys
+import struct
 from dotenv import load_dotenv
 
 # Add the zero_trust_vpn directory to sys.path
 sys.path.insert(0, os.path.dirname(__file__))
+import time
+import secrets
 from crypto_utils import decrypt_payload, load_private_key
 
 load_dotenv()
@@ -47,15 +50,9 @@ trust_scores = {}
 PUBLIC_PATHS = [
     "/logout",
     "/login",
-    "/",
-    "/static",
-    "/restricted",
-    "/request-admin-help",
-    "/self-service-verify",
-    "/confirm-recovery",
     "/public-request-help",
     "/verify_otp",
-    "/dashboard",
+    "/dashboard", # Handled via RBAC but allowing public check fallback
 ]
 
 # RBAC policy
@@ -74,6 +71,10 @@ RBAC_PENALTY = 5  # was 15 — too aggressive
 # Trust threshold below which session is terminated
 TERMINATE_THRESHOLD = 10  # was 40 — way too aggressive
 
+# Replay protection threshold (seconds)
+REPLAY_WINDOW = 30
+seen_nonces = set()
+nonce_lock  = threading.Lock()
 
 def allowed(role, path):
     for allowed_path in POLICY.get(role, []):
@@ -83,44 +84,76 @@ def allowed(role, path):
 
 
 def handle_client(conn, addr):
+    print(f"[VPN TRACE] Handling client from {addr}")
     try:
-        # Read all incoming bytes (encrypted payload)
-        chunks = []
-        while True:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if len(chunk) < 4096:
-                break
-        wire_data = b"".join(chunks)
+        # Read 4-byte total message length
+        header = conn.recv(4)
+        if not header or len(header) < 4:
+            print(f"[VPN TRACE] No header from {addr}")
+            return
+        total_len = struct.unpack(">I", header)[0]
+        print(f"[VPN TRACE] total_len: {total_len}")
 
-        if not wire_data:
+        # Read the entire message body
+        wire_data = b""
+        while len(wire_data) < total_len:
+            part = conn.recv(min(4096, total_len - len(wire_data)))
+            if not part: break
+            wire_data += part
+        
+        print(f"[VPN TRACE] wire_data len: {len(wire_data)}")
+        
+        if len(wire_data) < total_len:
+            print(f"[VPN TRACE] Incomplete message from {addr}")
             return
 
         # ─── RSA + AES Decrypt ───────────────────────────────────────────────
         try:
             plaintext = decrypt_payload(wire_data, PRIVATE_KEY)
+            print(f"[VPN TRACE] Decryption successful.")
             request_data = json.loads(plaintext)
+            print(f"[VPN TRACE] JSON parsed: {request_data.get('action', 'PATH_CHECK')}")
         except Exception as e:
-            print(f"[VPN] Decryption failed: {e}")
-            conn.sendall(b"DECRYPT_ERROR")
+            err_msg = f"DECRYPT_ERROR: {str(e)}"
+            print(f"[VPN TRACE] {err_msg}")
+            conn.sendall(err_msg.encode())
             return
 
-        jwt_token = request_data.get("jwt")
-        path      = request_data.get("path")
+        # ─── Replay Protection ───────────────────────────────────────────────
+        ts = request_data.get("ts", 0)
+        nonce = request_data.get("nonce")
+        
+        if abs(time.time() - ts) > REPLAY_WINDOW:
+            print(f"[VPN] REPLAY_ATTACK_DETECTED: Timestamp {ts} is outside window.")
+            conn.sendall(b"REPLAY_DETECTED")
+            return
+            
+        with nonce_lock:
+            if nonce in seen_nonces:
+                print(f"[VPN] REPLAY_ATTACK_DETECTED: Nonce {nonce} already seen.")
+                conn.sendall(b"REPLAY_DETECTED")
+                return
+            seen_nonces.add(nonce)
 
-        # ─── Verify JWT ─────────────────────────────────────────────────────
+        path = request_data.get("path", "")
+        action = request_data.get("action", "PATH_CHECK")
+
+        # ─── Auth Resolution (JWT) ────────────────────────────────
+        jwt_token = request_data.get("jwt")
+        print(f"[VPN DEBUG] JWT: {jwt_token}")
+        if not jwt_token:
+            conn.sendall(b"AUTH_REQUIRED")
+            return
         try:
             payload = jwt.decode(jwt_token, JWT_SECRET, algorithms=["HS256"])
+            username = payload["sub"]
+            role = payload["role"]
         except Exception as e:
             print(f"[VPN] JWT decode failed: {e}")
             conn.sendall(b"TOKEN_INVALID")
             return
 
-        username = payload["sub"]
-        role     = payload["role"]
-
+        # ─── Default: Path Check (RBAC) ──────────────────────────────────────
         trust_scores.setdefault(username, BASE_TRUST)
         trust = trust_scores[username]
 
@@ -161,6 +194,20 @@ def handle_client(conn, addr):
     finally:
         conn.close()
 
+
+def session_cleanup_task():
+    """Background thread to prune dead VPN sessions."""
+    while True:
+        time.sleep(60)
+        with session_lock:
+            now = time.time()
+            to_delete = [sid for sid, data in active_sessions.items() 
+                         if now - data["last_seen"] > SESSION_TIMEOUT]
+            for sid in to_delete:
+                print(f"[VPN] SESSION_TIMEOUT: Expiring session {sid}")
+                del active_sessions[sid]
+
+threading.Thread(target=session_cleanup_task, daemon=True).start()
 
 print(f"[VPN] Zero Trust Policy Server (RSA+AES encrypted) running on {HOST}:{PORT}")
 

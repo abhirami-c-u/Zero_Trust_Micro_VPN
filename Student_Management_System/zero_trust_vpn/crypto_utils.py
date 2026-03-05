@@ -78,24 +78,42 @@ def rsa_decrypt(ciphertext: bytes, private_key) -> bytes:
 # ─── Tunnel Wire Format ───────────────────────────────────────────────────────
 # Wire format: [4 bytes: len(enc_aes_key)] [enc_aes_key] [16 bytes: iv] [aes_ciphertext]
 
+import time
+import json
+
 def encrypt_payload(plaintext: str, public_key) -> bytes:
     """Encrypt a plaintext string for transmission over the VPN tunnel socket."""
     aes_key = os.urandom(32)   # AES-256
+    print(f"[CRYPTO DEBUG] Generated AES Key (hex): {aes_key[:4].hex()}...")
     iv      = os.urandom(16)   # CBC IV
 
-    enc_payload = aes_encrypt(plaintext.encode("utf-8"), aes_key, iv)
+    # Add timestamp and nonce for replay protection
+    data = json.loads(plaintext)
+    data["ts"] = time.time()
+    data["nonce"] = os.urandom(8).hex()
+    
+    enc_payload = aes_encrypt(json.dumps(data).encode("utf-8"), aes_key, iv)
     enc_aes_key = rsa_encrypt(aes_key, public_key)
+    print(f"[CRYPTO DEBUG] Encrypted AES Key (hex): {enc_aes_key[:8].hex()}...")
 
-    # Pack: 4-byte length of enc_aes_key, then the key, then iv, then payload
-    return struct.pack(">I", len(enc_aes_key)) + enc_aes_key + iv + enc_payload
-
+    # Pack: 4-byte total length, 4-byte enc_aes_key length, then key, iv, payload
+    body = struct.pack(">I", len(enc_aes_key)) + enc_aes_key + iv + enc_payload
+    print(f"[CRYPTO DEBUG] Body Len: {len(body)} | EncKeyLen: {len(enc_aes_key)}")
+    return struct.pack(">I", len(body)) + body
 
 def decrypt_payload(wire_data: bytes, private_key) -> str:
     """Decrypt wire data received over the VPN tunnel socket."""
+    # Wire data now starts with 4-byte total length, which we already read in server.
+    # So we expect [4 bytes: enc_key_len] [enc_key] [16 bytes: iv] [payload]
+    print(f"[CRYPTO DEBUG] Total Body Recv: {len(wire_data)}")
     enc_key_len = struct.unpack(">I", wire_data[:4])[0]
+    print(f"[CRYPTO DEBUG] Parsed EncKeyLen: {enc_key_len}")
     enc_aes_key = wire_data[4 : 4 + enc_key_len]
+    print(f"[CRYPTO DEBUG] Recv EncAESKey (hex): {enc_aes_key[:8].hex()}...")
     iv          = wire_data[4 + enc_key_len : 4 + enc_key_len + 16]
     enc_payload = wire_data[4 + enc_key_len + 16:]
+    print(f"[CRYPTO DEBUG] Payload Len: {len(enc_payload)}")
 
     aes_key = rsa_decrypt(enc_aes_key, private_key)
+    print(f"[CRYPTO DEBUG] Decrypted AES Key (hex): {aes_key[:4].hex()}...")
     return aes_decrypt(enc_payload, aes_key, iv).decode("utf-8")

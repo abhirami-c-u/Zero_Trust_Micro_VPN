@@ -3,6 +3,9 @@ import os
 import time
 import threading
 import traceback
+import json
+import base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # =========================
 # LOG DIRECTORY SETUP
@@ -19,14 +22,47 @@ ERROR_LOG = os.path.join(LOGS_DIR, "error.log")
 # Thread lock to prevent race conditions
 log_lock = threading.Lock()
 
+# Persistent state for sequence numbering
+_sequence_number = 0
+
+# Load Log Encryption Key
+LOG_KEY_PATH = os.path.join(BASE_DIR, "keys", "log_key.bin")
+try:
+    with open(LOG_KEY_PATH, "rb") as f:
+        LOG_KEY = f.read()
+    aesgcm = AESGCM(LOG_KEY)
+except FileNotFoundError:
+    LOG_KEY = None
+    print(f"[LOGGER] WARNING: Log encryption key not found at {LOG_KEY_PATH}. Logging in plaintext.")
+
 # =========================
 # INTERNAL WRITE FUNCTION
 # =========================
 def _write_log(filepath, message):
+    global _sequence_number
     with log_lock:
+        _sequence_number += 1
+        
+        if LOG_KEY:
+            # Encrypt with AES-GCM
+            nonce = os.urandom(12)
+            # Add sequence number to plaintext for audit integrity
+            payload = f"SEQ={_sequence_number} | {message}".encode("utf-8")
+            ciphertext = aesgcm.encrypt(nonce, payload, None)
+            
+            # Write as Base64 JSON envelope
+            entry = {
+                "seq": _sequence_number,
+                "nonce": base64.b64encode(nonce).decode("utf-8"),
+                "data": base64.b64encode(ciphertext).decode("utf-8")
+            }
+            line = json.dumps(entry)
+        else:
+            line = f"SEQ={_sequence_number} | {message}"
+
         with open(filepath, "a", encoding="utf-8") as f:
-            f.write(message + "\n")
-            f.flush()  # force write to disk
+            f.write(line + "\n")
+            f.flush()
 
 
 # =========================

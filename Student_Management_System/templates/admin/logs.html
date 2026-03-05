@@ -1,32 +1,156 @@
 {% extends "base.html" %}
-{% block title %}System Logs{% endblock %}
+{% block title %}Audit Logs | Secure Admin{% endblock %}
 
 {% block content %}
 <div class="dashboard">
-    <div class="dashboard-header">
-        <h1>Access Logs</h1>
-         <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">
-            ← Back to Dashboard
+    <div class="dashboard-header animate-fade-in">
+        <h1><i class="fas fa-shield-alt"></i> Secure Audit Logs</h1>
+        <div class="header-actions">
+            <span class="trust-badge">
+                <i class="fas fa-key"></i> Encrypted AES-GCM
+            </span>
+            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">
+                <i class="fas fa-arrow-left"></i> Back
+            </a>
+        </div>
+    </div>
+
+    <!-- Log Filter Tabs -->
+    <div class="log-tabs animate-slide-up">
+        <a href="{{ url_for('admin_logs', type='session') }}" class="tab {% if type == 'session' %}active{% endif %}">
+            <i class="fas fa-history"></i> Sessions
+        </a>
+        <a href="{{ url_for('admin_logs', type='security') }}" class="tab {% if type == 'security' %}active{% endif %}">
+            <i class="fas fa-user-shield"></i> Security alerts
+        </a>
+        <a href="{{ url_for('admin_logs', type='error') }}" class="tab {% if type == 'error' %}active{% endif %}">
+            <i class="fas fa-exclamation-triangle"></i> System Errors
+        </a>
+        <a href="{{ url_for('admin_logs', type='database') }}" class="tab {% if type == 'database' %}active{% endif %}">
+            <i class="fas fa-database"></i> Database Access
         </a>
     </div>
 
-    <div class="card table-container">
-        <table>
-            <tr>
-                <th>User</th>
-                <th>Action</th>
-                <th>IP</th>
-                <th>Time</th>
-            </tr>
-            {% for log in logs %}
-            <tr>
-                <td>{{ log.username or 'System' }}</td>
-                <td>{{ log.action }}</td>
-                <td>{{ log.ip }}</td>
-                <td>{{ log.timestamp }}</td>
-            </tr>
-            {% endfor %}
-        </table>
+    <div class="card log-container animate-fade-in">
+        <div class="log-viewer">
+            {% if type == 'database' %}
+                <table class="premium-table">
+                    <thead>
+                        <tr>
+                            <th>User</th>
+                            <th>Action</th>
+                            <th>IP</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for log in logs %}
+                        <tr>
+                            <td><span class="user-chip">{{ log.username or 'System' }}</span></td>
+                            <td><code>{{ log.action }}</code></td>
+                            <td><small>{{ log.ip }}</small></td>
+                            <td>{{ log.timestamp }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% else %}
+                <div class="decrypted-list">
+                    {% for entry in decrypted_logs %}
+                        <div class="log-entry {% if entry.encrypted %}encrypted{% else %}plain{% endif %}">
+                            <span class="log-meta">
+                                {% if entry.seq %}<span class="seq">#{{ entry.seq.split('=')[1] }}</span>{% endif %}
+                                {% if entry.encrypted %}<i class="fas fa-lock-open success-text" title="Decrypted via AES-GCM"></i>{% endif %}
+                            </span>
+                            <span class="log-text">{{ entry.content }}</span>
+                        </div>
+                    {% else %}
+                        <div class="empty-state">
+                            <i class="fas fa-folder-open"></i>
+                            <p>No log entries found for this category.</p>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        </div>
     </div>
 </div>
+
+<style>
+    .log-tabs {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        padding-bottom: 5px;
+    }
+    .tab {
+        padding: 10px 20px;
+        color: var(--text-muted);
+        text-decoration: none;
+        border-radius: 8px 8px 0 0;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .tab:hover {
+        background: rgba(255,255,255,0.05);
+        color: var(--text-light);
+    }
+    .tab.active {
+        background: var(--primary-gradient);
+        color: white;
+        box-shadow: 0 -4px 15px rgba(0,123,255,0.3);
+    }
+    .log-viewer {
+        max-height: 600px;
+        overflow-y: auto;
+        padding: 10px;
+        background: rgba(0,0,0,0.2);
+        border-radius: 8px;
+        font-family: 'Fira Code', 'Courier New', monospace;
+    }
+    .log-entry {
+        padding: 8px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        display: flex;
+        gap: 15px;
+        font-size: 0.9rem;
+    }
+    .log-entry:hover {
+        background: rgba(255,255,255,0.03);
+    }
+    .seq {
+        color: var(--primary-color);
+        font-weight: bold;
+        min-width: 40px;
+    }
+    .log-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 70px;
+    }
+    .success-text { color: #2ecc71; }
+    .log-text { color: #e0e0e0; line-height: 1.4; }
+    .user-chip {
+        background: rgba(0,123,255,0.1);
+        color: var(--primary-color);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+    .trust-badge {
+        background: rgba(46, 204, 113, 0.1);
+        color: #2ecc71;
+        padding: 5px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid rgba(46, 204, 113, 0.2);
+    }
+</style>
 {% endblock %}
