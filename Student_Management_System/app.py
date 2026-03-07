@@ -49,11 +49,11 @@ LOG_FILE = "logs/actions.log"
 READ_ONLY_MODE = False
 
 # SMTP CONFIG
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SENDER_EMAIL = "techupport2363@gmail.com"
-APP_PASSWORD = "vjjd brfa uiul aetm"
-ADMIN_EMAIL = "techupport2363@gmail.com"
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "techupport2363@gmail.com")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "vjjd brfa uiul aetm")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "techupport2363@gmail.com")
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY

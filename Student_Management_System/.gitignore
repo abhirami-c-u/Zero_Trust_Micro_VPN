@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.env
+
+# Database
+db/portal.db
+portal.db
+
+# Logs
+logs/
+*.log
+
+# VPN Keys (Generated)
+zero_trust_vpn/keys/
+*.pem
+*.bin
+
+# OS generated files
+.DS_Store
+Thumbs.db
