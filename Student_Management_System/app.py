@@ -26,12 +26,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from base64 import b64decode
 import sys
 
+# Load environment variables from .env (must match vpn_server.py)
+load_dotenv()
+
 # Add zero_trust_vpn to path for logger import
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "zero_trust_vpn"))
 import logger
-
-# Load environment variables from .env (must match vpn_server.py)
-load_dotenv()
+from db_adapter import db_adapter
 
 # =============================================================================
 # CONFIGURATION
@@ -49,33 +50,38 @@ LOG_FILE = "logs/actions.log"
 READ_ONLY_MODE = False
 
 # SMTP CONFIG
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "techupport2363@gmail.com")
-APP_PASSWORD = os.getenv("APP_PASSWORD", "vjjd brfa uiul aetm")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "techupport2363@gmail.com")
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "techupport2363@gmail.com"
+APP_PASSWORD = "vjjd brfa uiul aetm"
+ADMIN_EMAIL = "techupport2363@gmail.com"
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.permanent_session_lifetime = PERMANENT_SESSION_LIFETIME
 
+# Detective helper for Postgres (used for conditional logic in routes)
+def is_postgres_mode():
+    return db_adapter.is_postgres
+
 # =============================================================================
 # DATABASE INITIALIZATION
 # =============================================================================
 def init_db():
-    if not os.path.exists("db"):
-        os.mkdir("db")
     if not os.path.exists("logs"):
         os.mkdir("logs")
     
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    conn = db_adapter.get_connection()
     
-    # Create all tables
-    c.executescript("""
+    # Tables with compatibility adjustments (SERIAL/AUTOINCREMENT/TIMESTAMP)
+    current_is_postgres = conn.is_postgres
+    id_type = "SERIAL PRIMARY KEY" if current_is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    ts_type = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP" if current_is_postgres else "DATETIME DEFAULT CURRENT_TIMESTAMP"
+    
+    schema = f"""
     -- Users table with security fields
     CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('student', 'parent', 'faculty', 'admin')),
@@ -96,7 +102,7 @@ def init_db():
 
     -- Students table
     CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER UNIQUE,
         roll TEXT UNIQUE NOT NULL,
         department TEXT DEFAULT 'Computer Science',
@@ -110,7 +116,7 @@ def init_db():
 
     -- Parents table (linked to students)
     CREATE TABLE IF NOT EXISTS parents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER UNIQUE,
         student_id INTEGER,
         relationship TEXT DEFAULT 'Parent',
@@ -120,7 +126,7 @@ def init_db():
 
     -- Faculty table
     CREATE TABLE IF NOT EXISTS faculty (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER UNIQUE,
         employee_id TEXT UNIQUE,
         department TEXT,
@@ -130,7 +136,7 @@ def init_db():
 
     -- Access logs for security auditing
     CREATE TABLE IF NOT EXISTS access_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER,
         action TEXT,
         resource TEXT,
@@ -139,32 +145,32 @@ def init_db():
         reason TEXT,
         ip TEXT,
         ua TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp {ts_type}
     );
 
-    -- Profile change requests (student requests, admin approves)
+    -- Profile change requests
     CREATE TABLE IF NOT EXISTS profile_change_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         student_id INTEGER,
         field_name TEXT,
         old_value TEXT,
         new_value TEXT,
         trust_score INTEGER,
-        requested_at DATETIME,
+        requested_at {ts_type},
         status TEXT DEFAULT 'pending',
         reviewed_by INTEGER,
-        reviewed_at DATETIME,
+        reviewed_at {ts_type},
         FOREIGN KEY(student_id) REFERENCES users(id),
         FOREIGN KEY(reviewed_by) REFERENCES users(id)
     );
 
     -- Trusted devices for adaptive MFA
     CREATE TABLE IF NOT EXISTS trusted_devices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER,
         device_id TEXT,
-        first_seen DATETIME,
-        last_seen DATETIME,
+        first_seen {ts_type},
+        last_seen {ts_type},
         seen_count INTEGER DEFAULT 1,
         risk_flag INTEGER DEFAULT 0,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -172,35 +178,35 @@ def init_db():
 
     -- Trust score history
     CREATE TABLE IF NOT EXISTS trust_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER,
         old_score INTEGER,
         new_score INTEGER,
         reason TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        timestamp {ts_type},
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     -- Announcements
     CREATE TABLE IF NOT EXISTS announcements (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         title TEXT NOT NULL,
         message TEXT NOT NULL,
         posted_by INTEGER,
         target_role TEXT DEFAULT 'all',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at {ts_type},
         FOREIGN KEY(posted_by) REFERENCES users(id)
     );
 
     -- Grievances
     CREATE TABLE IF NOT EXISTS grievances (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         student_id INTEGER,
         subject TEXT,
         description TEXT,
         status TEXT DEFAULT 'pending',
-        submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        resolved_at DATETIME,
+        submitted_at {ts_type},
+        resolved_at {ts_type},
         resolved_by INTEGER,
         FOREIGN KEY(student_id) REFERENCES users(id),
         FOREIGN KEY(resolved_by) REFERENCES users(id)
@@ -208,7 +214,7 @@ def init_db():
 
     -- Marks table (detailed)
     CREATE TABLE IF NOT EXISTS marks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         student_id INTEGER,
         subject TEXT,
         marks_obtained INTEGER,
@@ -217,14 +223,14 @@ def init_db():
         max_marks INTEGER DEFAULT 100,
         exam_type TEXT DEFAULT 'Internal',
         entered_by INTEGER,
-        entered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        entered_at {ts_type},
         FOREIGN KEY(student_id) REFERENCES students(id),
         FOREIGN KEY(entered_by) REFERENCES users(id)
     );
 
     -- Attendance table (detailed)
     CREATE TABLE IF NOT EXISTS attendance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         student_id INTEGER,
         date TEXT,
         status TEXT CHECK(status IN ('present', 'absent', 'late')),
@@ -232,42 +238,27 @@ def init_db():
         marked_by INTEGER,
         faculty_id INTEGER,
         class_id INTEGER,
-        marked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        marked_at {ts_type},
         FOREIGN KEY(student_id) REFERENCES students(id),
         FOREIGN KEY(marked_by) REFERENCES users(id)
     );
 
-    CREATE TABLE IF NOT EXISTS profile_change_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER,
-        field_name TEXT,
-        old_value TEXT,
-        new_value TEXT,
-        trust_score INTEGER,
-        requested_at DATETIME,
-        status TEXT DEFAULT 'pending',
-        reviewed_by INTEGER,
-        reviewed_at DATETIME,
-        FOREIGN KEY(student_id) REFERENCES users(id),
-        FOREIGN KEY(reviewed_by) REFERENCES users(id)
-    );
-
     CREATE TABLE IF NOT EXISTS device_fingerprints (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER,
         user_agent TEXT,
         ip_address TEXT,
-        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+        first_seen {ts_type}
     );
 
     CREATE TABLE IF NOT EXISTS parent_grievances (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         parent_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         description TEXT NOT NULL,
         status TEXT DEFAULT 'Pending',
-        submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        resolved_at DATETIME,
+        submitted_at {ts_type},
+        resolved_at {ts_type},
         resolved_by INTEGER,
         FOREIGN KEY(parent_id) REFERENCES users(id),
         FOREIGN KEY(resolved_by) REFERENCES users(id)
@@ -275,10 +266,10 @@ def init_db():
 
     -- Fee payments
     CREATE TABLE IF NOT EXISTS fee_payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         student_id INTEGER,
         amount REAL,
-        payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+        payment_date {ts_type},
         payment_method TEXT,
         transaction_id TEXT,
         FOREIGN KEY(student_id) REFERENCES students(id)
@@ -286,17 +277,17 @@ def init_db():
 
     -- Login history for anomaly detection
     CREATE TABLE IF NOT EXISTS login_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         user_id INTEGER,
         login_hour INTEGER,
         ip_address TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        timestamp {ts_type},
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     -- Classes table
     CREATE TABLE IF NOT EXISTS classes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         name TEXT NOT NULL,
         department TEXT,
         faculty_id INTEGER,
@@ -306,7 +297,7 @@ def init_db():
 
     -- Class Enrollments (Students <-> Classes)
     CREATE TABLE IF NOT EXISTS class_enrollments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         class_id INTEGER,
         student_id INTEGER,
         UNIQUE(class_id, student_id),
@@ -316,52 +307,54 @@ def init_db():
 
     -- Assignments table
     CREATE TABLE IF NOT EXISTS assignments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         class_id INTEGER,
         title TEXT NOT NULL,
         description TEXT,
         due_date TEXT,
         faculty_id INTEGER,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at {ts_type},
         FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE,
         FOREIGN KEY(faculty_id) REFERENCES faculty(id)
     );
 
     -- Submissions table
     CREATE TABLE IF NOT EXISTS submissions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id {id_type},
         assignment_id INTEGER,
         student_id INTEGER,
         submission_text TEXT,
-        submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        submitted_at {ts_type},
         grade TEXT,
         feedback TEXT,
         FOREIGN KEY(assignment_id) REFERENCES assignments(id) ON DELETE CASCADE,
         FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
     );
-    """)
+    """
+    conn.executescript(schema)
     
     # Check if we need a default admin
-    existing = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    existing = conn.fetchone("SELECT COUNT(*) as count FROM users")["count"]
     if existing == 0:
         # Create a default admin user if the database is empty
         admin_pass = generate_password_hash("admin123")
-        c.execute("""
+        conn.execute("""
             INSERT INTO users (username, password_hash, role, email, name, phone) 
             VALUES (?,?,?,?,?,?)
         """, ("admin", admin_pass, "admin", "admin@portal.com", "System Admin", "0000000000"))
         conn.commit()
         print("[INFO] Empty database detected. Created default admin: 'admin' / 'admin123'")
     
-    # Ensure new columns exist (Migration)
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN typical_login_hour INTEGER")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN last_ip TEXT")
-    except:
-        pass
+    # Ensure new columns exist (Migration for older SQLite versions)
+    if not current_is_postgres:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN typical_login_hour INTEGER")
+        except:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN last_ip TEXT")
+        except:
+            pass
 
     # Reset active sessions on startup
     try:
@@ -381,8 +374,7 @@ init_db()
 # =============================================================================
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
+        g.db = db_adapter.get_connection()
     return g.db
 
 @app.teardown_appcontext
