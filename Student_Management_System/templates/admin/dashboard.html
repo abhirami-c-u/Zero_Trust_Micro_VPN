@@ -19,13 +19,6 @@
 
     <div class="dashboard-grid">
 
-        <!-- Setup MFA -->
-        <a href="{{ url_for('enroll_totp') }}" class="dashboard-card dashboard-link" style="border: 2px solid var(--primary);">
-            <div class="card-icon"><i class="fa-solid fa-qrcode" style="color: var(--primary);"></i></div>
-            <h3>Setup MFA</h3>
-            <p>Connect Google Authenticator for this admin account.</p>
-        </a>
-
         <!-- Admin Action Cards -->
         <a href="{{ url_for('admin_users') }}" class="dashboard-card dashboard-link">
             <div class="card-icon">👤</div>

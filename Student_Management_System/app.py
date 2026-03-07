@@ -349,14 +349,15 @@ def init_db():
         conn.commit()
         print("[INFO] Empty database detected. Created default admin: 'admin' / 'admin123'")
     
-    # Ensure new columns exist (Migration for older SQLite versions)
-    if not current_is_postgres:
+    # Ensure new columns exist (Migration)
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN typical_login_hour INTEGER",
+        "ALTER TABLE users ADD COLUMN last_ip TEXT",
+        "ALTER TABLE users ADD COLUMN totp_secret TEXT",
+    ]:
         try:
-            conn.execute("ALTER TABLE users ADD COLUMN typical_login_hour INTEGER")
-        except:
-            pass
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN last_ip TEXT")
+            conn.execute(col_sql)
+            conn.commit()
         except:
             pass
 

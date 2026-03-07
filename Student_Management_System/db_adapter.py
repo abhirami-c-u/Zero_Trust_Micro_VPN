@@ -17,10 +17,15 @@ class ConnectionWrapper:
                 query = query.lower().replace("last_insert_rowid()", "lastval()")
         
         cur = self.conn.cursor()
-        if params:
-            cur.execute(query, params)
-        else:
-            cur.execute(query)
+        try:
+            if params:
+                cur.execute(query, params)
+            else:
+                cur.execute(query)
+        except Exception as e:
+            if self.is_postgres:
+                self.conn.rollback()
+            raise
         return cur
 
     def commit(self):
@@ -31,11 +36,22 @@ class ConnectionWrapper:
 
     def executescript(self, script):
         if self.is_postgres:
+            # PostgreSQL: split by semicolons and execute each statement individually
+            # so one failure doesn't abort the entire transaction
             cur = self.conn.cursor()
-            cur.execute(script)
+            statements = [s.strip() for s in script.split(';') if s.strip()]
+            for stmt in statements:
+                try:
+                    cur.execute(stmt)
+                except Exception as e:
+                    print(f"[DB] Statement skipped (likely already exists): {e}")
+                    self.conn.rollback()
             self.conn.commit()
         else:
             self.conn.executescript(script)
+
+    def rollback(self):
+        self.conn.rollback()
 
     def fetchone(self, query, params=None):
         cur = self.execute(query, params)
