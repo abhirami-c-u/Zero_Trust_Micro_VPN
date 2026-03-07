@@ -24,9 +24,9 @@
                 👤 {{ session.get('username') }}
                 <span class="role-badge role-{{ session.get('role') }}">{{ session.get('role')|capitalize }}</span>
             </span>
-            {% if session.get('trust_score') %}
+            {% if session.get('trust_score') is not none %}
             <span
-                class="trust-badge {% if session.get('trust_score', 100) >= 80 %}trust-high{% elif session.get('trust_score', 100) >= 50 %}trust-medium{% else %}trust-low{% endif %}">
+                class="trust-badge {% if session.get('trust_score', 100) >= 60 %}trust-high{% elif session.get('trust_score', 100) >= 50 %}trust-medium{% else %}trust-low{% endif %}">
                 🛡️ Trust: {{ session.get('trust_score', 100) }}
             </span>
             {% endif %}

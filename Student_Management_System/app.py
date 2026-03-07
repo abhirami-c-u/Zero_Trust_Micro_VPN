@@ -41,6 +41,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "your_jwt_secret_key")
 DB_PATH = "db/portal.db"
 PERMANENT_SESSION_LIFETIME = timedelta(hours=2)
 TRUST_SCORE_THRESHOLD = 50
+SENSITIVE_TRUST_THRESHOLD = 60  # Marks, Attendance, Fees require at least 60
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes idle timeout
 BLOCK_DURATION_MINUTES = 10
 DEVICE_TRUST_THRESHOLD = 1
@@ -405,6 +406,66 @@ def write_access_log(conn, user_id, action, resource, resource_id, allowed, reas
 # =============================================================================
 # SECURE LOG DECRYPTION FOR ADMIN
 # =============================================================================
+def parse_log_line(content):
+    """Parses a pipe-delimited log string into a structured dictionary."""
+    if " | " not in content:
+        return {"message": content}
+    
+    parts = content.split(" | ")
+    data = {"timestamp": parts[0].strip()}
+    
+    # Track which parts highlight specific known fields
+    for part in parts[1:]:
+        part = part.strip()
+        if not part: continue
+        
+        if "=" in part:
+            key, val = part.split("=", 1)
+            data[key.lower().strip()] = val.strip()
+        elif "⚠ SUSPICIOUS" in part:
+            data["decision"] = "ALERT"
+            data["status"] = "SUSPICIOUS"
+        elif "❌ ERROR" in part:
+            data["decision"] = "ERROR"
+            data["status"] = "ERROR"
+        elif "TRUST_CHANGE" in part:
+            data["action"] = "Trust Change"
+        elif " → " in part:
+            data["action_detail"] = part
+            # Extract new trust score from "100 → 85"
+            try:
+                data["trust"] = part.split(" → ")[-1].strip()
+            except: pass
+        elif "Trust reduced to" in part:
+            try:
+                data["trust"] = part.split("reduced to")[-1].strip()
+            except: pass
+        else:
+            # If it's just text, it's probably the action or message
+            if "action" not in data:
+                data["action"] = part
+            elif "message" not in data:
+                data["message"] = part
+            else:
+                data["message"] = data.get("message", "") + " | " + part
+                
+    # Normalize decision for UI badges
+    if "decision" not in data:
+        if "status" in data:
+            data["decision"] = data["status"]
+        else:
+            data["decision"] = "INFO"
+
+    # Normalize user field
+    if "user" not in data and "username" in data:
+        data["user"] = data["username"]
+            
+    # Normalize action/message for better UI display
+    if "action" not in data and "path" in data:
+         data["action"] = data["path"]
+            
+    return data
+
 def get_decrypted_log_entries(log_type="session", limit=100):
     """Decrypts and returns entries from the specified secure log file."""
     log_paths = {
@@ -443,18 +504,30 @@ def get_decrypted_log_entries(log_type="session", limit=100):
                     ciphertext = b64decode(data["data"])
                     decrypted = aesgcm.decrypt(nonce, ciphertext, None).decode("utf-8")
                     
-                    # Split SEQ and Message if present
+                    # Structured parsing
+                    entry_data = {"encrypted": True}
+                    
+                    # Split SEQ if present
                     if " | " in decrypted:
                         parts = decrypted.split(" | ", 1)
-                        # parts[0] is SEQ=x, parts[1] is the actual log string
-                        entries.append({"encrypted": True, "content": parts[1], "seq": parts[0]})
+                        if parts[0].startswith("SEQ="):
+                            entry_data["seq"] = parts[0].split("=", 1)[1]
+                            content = parts[1]
+                        else:
+                            content = decrypted
                     else:
-                        entries.append({"encrypted": True, "content": decrypted})
+                        content = decrypted
+                        
+                    # Parse the actual log content
+                    parsed = parse_log_line(content)
+                    entry_data.update(parsed)
+                    entries.append(entry_data)
                 except:
                     # Legacy plaintext format
-                    entries.append({"encrypted": False, "content": line})
+                    parsed = parse_log_line(line)
+                    entries.append({"encrypted": False, **parsed})
     except Exception as e:
-        entries.append({"content": f"Error reading log: {str(e)}"})
+        entries.append({"message": f"Error reading log: {str(e)}"})
     
     return entries
 
@@ -467,7 +540,7 @@ def log_action(action):
 # SECURITY UTILITIES
 # =============================================================================
 def trust_allows_sensitive():
-    return session.get("trust_score", 100) >= 80
+    return session.get("trust_score", 100) >= SENSITIVE_TRUST_THRESHOLD
 
 def get_device_fingerprint():
     ua = request.headers.get("User-Agent", "")
@@ -833,7 +906,7 @@ def rate_limit(f):
 
 
 def check_trust_recovery():
-    """Award trust points for sustained good behavior (1 hour without violations)"""
+    """Award trust points for sustained good behavior (5 minutes without violations)"""
     if "user_id" not in session:
         return
 
@@ -845,8 +918,8 @@ def check_trust_recovery():
         session["last_trust_recovery"] = now
         return
 
-    # Check if 1 hour (3600 seconds) has passed
-    if now - last_recovery >= 3600:
+    # Check if 5 minutes (300 seconds) has passed
+    if now - last_recovery >= 300:
         user_id = session.get("user_id")
         username = session.get("username")
         conn = get_db()
@@ -1291,7 +1364,14 @@ def vpn_tunnel():
             try:
                 data = json.loads(response)
                 if data.get("action") == "JWT_DOWNGRADED":
-                    session["trust_score"] = data.get("trust", 0)
+                    new_trust = data.get("trust", 0)
+                    session["trust_score"] = new_trust
+                    # Persist to DB so session and DB stay in sync
+                    user_id = session.get("user_id")
+                    if user_id:
+                        conn = get_db()
+                        conn.execute("UPDATE users SET trust_score=? WHERE id=?", (new_trust, user_id))
+                        conn.commit()
                     flash("VPN Access Denied: Unauthorized resource. Trust score reduced.", "danger")
                     return redirect(url_for("restricted"))
             except Exception:
@@ -1314,10 +1394,17 @@ def enforce_zero_trust():
     if not session.get("user_id"):
         return
 
+    # Sync session trust from DB (source of truth) for consistent display
+    if session.get("user_id"):
+        conn = get_db()
+        user = conn.execute("SELECT trust_score FROM users WHERE id=?", (session["user_id"],)).fetchone()
+        if user is not None:
+            db_trust = user["trust_score"] if user["trust_score"] is not None else 100
+            session["trust_score"] = db_trust
     trust = session.get("trust_score", 100)
 
     # Just mark restriction, don't redirect
-    session["low_trust"] = trust < 80
+    session["low_trust"] = trust < SENSITIVE_TRUST_THRESHOLD
 
 
 @app.route("/self-service-verify")
@@ -1630,6 +1717,9 @@ def dashboard():
 
 
 def student_marks():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view marks.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     student = conn.execute("SELECT * FROM students WHERE user_id=?", (uid,)).fetchone()
@@ -1663,6 +1753,9 @@ def student_marks():
 @login_required
 @role_required(['student'])
 def student_attendance():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view attendance.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     student = conn.execute("SELECT * FROM students WHERE user_id=?", (uid,)).fetchone()
@@ -1696,6 +1789,9 @@ def student_attendance():
 @login_required
 @role_required(['student'])
 def student_fees():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view fees.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     student = conn.execute("SELECT * FROM students WHERE user_id=?", (uid,)).fetchone()
@@ -1869,6 +1965,9 @@ def submit_parent_grievance():
 @login_required
 @role_required(['parent'])
 def parent_marks():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view your child's marks.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     parent = conn.execute("SELECT * FROM parents WHERE user_id=?", (uid,)).fetchone()
@@ -1896,6 +1995,9 @@ def parent_marks():
 @login_required
 @role_required(['parent'])
 def parent_attendance():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view your child's attendance.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     parent = conn.execute("SELECT * FROM parents WHERE user_id=?", (uid,)).fetchone()
@@ -1931,6 +2033,9 @@ def parent_attendance():
 @login_required
 @role_required(['parent'])
 def parent_fees():
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to view fee details.", "warning")
+        return redirect(url_for("restricted"))
     uid = session["user_id"]
     conn = get_db()
     parent = conn.execute("SELECT * FROM parents WHERE user_id=?", (uid,)).fetchone()
@@ -2031,6 +2136,9 @@ def student_list():
 @login_required
 @role_required(['faculty', 'admin'], readonly_for_admin=True)
 def faculty_marks(readonly=False):
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to access marks entry.", "warning")
+        return redirect(url_for("restricted"))
     if READ_ONLY_MODE:
         flash("System is in Read-Only Mode. Changes are not allowed.", "warning")
         return redirect(url_for("dashboard"))
@@ -2085,6 +2193,9 @@ def faculty_marks(readonly=False):
 @login_required
 @role_required(['faculty', 'admin'], readonly_for_admin=True)
 def faculty_attendance(readonly=False):
+    if not trust_allows_sensitive():
+        flash("Trust score must be at least 60 to access attendance entry.", "warning")
+        return redirect(url_for("restricted"))
     if READ_ONLY_MODE:
         flash("System is in Read-Only Mode. Changes are not allowed.", "warning")
         return redirect(url_for("dashboard"))
@@ -2369,9 +2480,19 @@ def admin_logs():
     
     if log_type == 'database':
         conn = get_db()
-        logs = conn.execute("""SELECT al.*, u.username FROM access_logs al 
-                              LEFT JOIN users u ON al.user_id=u.id 
-                              ORDER BY al.timestamp DESC LIMIT 200""").fetchall()
+        # Fetch with role and trust score for better UI
+        rows = conn.execute("""SELECT al.*, u.username, u.role, u.trust_score 
+                               FROM access_logs al 
+                               LEFT JOIN users u ON al.user_id=u.id 
+                               ORDER BY al.timestamp DESC LIMIT 200""").fetchall()
+        
+        # Convert rows to dicts and normalize 'decision' from 'allowed'
+        logs = []
+        for r in rows:
+            entry = dict(r)
+            entry['decision'] = 'ALLOW' if entry['allowed'] else 'DENY'
+            logs.append(entry)
+            
         return render_template("admin/logs.html", logs=logs, type='database', trust_score=session.get("trust_score", 100))
     else:
         # Fetch from encrypted files
@@ -2805,12 +2926,6 @@ if __name__ == "__main__":
     print("=" * 60)
     print("STUDENT MANAGEMENT PORTAL")
     print("=" * 60)
-    print("\nDemo Credentials:")
-    print("-" * 40)
-    print("Student:  student1 / student123")
-    print("Parent:   parent1  / parent123")
-    print("Faculty:  faculty1 / faculty123")
-    print("Admin:    admin1   / admin123")
     print("-" * 40)
     print("\nStarting server at http://127.0.0.1:5000")
     print("=" * 60)

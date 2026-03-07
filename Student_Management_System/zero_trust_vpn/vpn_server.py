@@ -52,7 +52,8 @@ PUBLIC_PATHS = [
     "/login",
     "/public-request-help",
     "/verify_otp",
-    "/dashboard", # Handled via RBAC but allowing public check fallback
+    "/dashboard",  # Handled via RBAC but allowing public check fallback
+    "/restricted",  # Low-trust landing page — must be reachable without RBAC penalty to avoid redirect loop
 ]
 
 # RBAC policy
