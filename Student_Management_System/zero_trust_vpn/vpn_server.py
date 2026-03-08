@@ -27,8 +27,8 @@ from db_adapter import db_adapter
 
 load_dotenv()
 
-HOST = "127.0.0.1"
-PORT = 5012
+HOST = os.getenv("VPN_HOST", "127.0.0.1")
+PORT = int(os.getenv("VPN_PORT", "5012"))
 JWT_SECRET = os.getenv("JWT_SECRET", "your_jwt_secret_key")
 
 PRIVATE_KEY_PATH = os.path.join(os.path.dirname(__file__), "keys", "private.pem")
