@@ -500,12 +500,21 @@ def get_decrypted_log_entries(log_type="session", limit=100):
         return []
 
     # Get log key for decryption
-    try:
-        with open(logger.LOG_KEY_PATH, "rb") as f:
-            log_key = f.read()
-        aesgcm = AESGCM(log_key)
-    except:
-        aesgcm = None
+    env_key = os.getenv("LOG_KEY")
+    aesgcm = None
+    if env_key:
+        try:
+            log_key = base64.b64decode(env_key)
+            aesgcm = AESGCM(log_key)
+        except:
+            pass
+    if not aesgcm:
+        try:
+            with open(logger.LOG_KEY_PATH, "rb") as f:
+                log_key = f.read()
+            aesgcm = AESGCM(log_key)
+        except:
+            pass
 
     entries = []
     for row in rows:
@@ -560,29 +569,37 @@ def trust_allows_sensitive():
     return session.get("trust_score", 100) >= SENSITIVE_TRUST_THRESHOLD
 
 def get_device_fingerprint():
+    """Use a persistent secure cookie for device fingerprinting instead of volatile IPs."""
+    device_id = request.cookies.get("trusted_device")
+    if device_id:
+        return device_id
+        
+    # Fallback if cookie not set yet: hash User-Agent and IP subnet (first 3 octets)
     ua = request.headers.get("User-Agent", "")
     ip = get_real_ip()
-    raw = ua + ip
+    # Mask last octet to prevent false flags on minor mobile IP cycles
+    subnet = ".".join(ip.split(".")[:3]) if "." in ip else ip
+    raw = ua + subnet
     return hashlib.sha256(raw.encode()).hexdigest()
 
 def check_device_fingerprint(user_id):
-    ua = request.headers.get("User-Agent")
+    device_id = get_device_fingerprint()
+    ua = request.headers.get("User-Agent", "")
     ip = get_real_ip()
 
     conn = get_db()
     existing = conn.execute("""
         SELECT id FROM device_fingerprints
-        WHERE user_id=? AND user_agent=? AND ip_address=?
-    """, (user_id, ua, ip)).fetchone()
+        WHERE user_id=? AND ip_address=?
+    """, (user_id, device_id)).fetchone()
 
     if not existing:
         conn.execute("""
             INSERT INTO device_fingerprints (user_id, user_agent, ip_address)
             VALUES (?, ?, ?)
-        """, (user_id, ua, ip))
+        """, (user_id, ua, device_id))
         conn.commit()
 
-        
         flash("⚠ New device detected. Trust score reduced.", "warning")
 
 
@@ -674,46 +691,17 @@ def detect_anomalies(user_id, current_ip):
                 "msg": f"Unusual login time: {current_hour}:00 (Typical: {typical_hour}:00)"
             })
 
-    # 2. Impossible Travel Detection
+    # 2. Impossible Travel Detection (Temporarily disabled mock IP distance math)
+    # The previous logic subtracted IP octets and acted as kilometers, 
+    # breaking completely with public routing. We'll only check Time-of-Day for now.
     last_ip = user["last_ip"]
     last_login_str = user["last_login"]
     
     if last_ip and last_ip != current_ip and last_login_str:
-        try:
-            last_login = datetime.fromisoformat(last_login_str)
-            time_diff_mins = (datetime.utcnow() - last_login).total_seconds() / 60
-            
-            # Mock distance calculation based on IP subnets (simplified)
-            # IP: A.B.C.D
-            def get_dist(ip1, ip2):
-                if ":" in ip1 or ":" in ip2: # IPv6/Localhost
-                    return 0 if ip1 == ip2 else 1000
-                
-                try:
-                    p1 = [int(x) for x in ip1.split(".")]
-                    p2 = [int(x) for x in ip2.split(".")]
-                    if len(p1) < 2 or len(p2) < 2: return 0
-                    # Simple distance: higher if first octets differ
-                    dist = abs(p1[0] - p2[0]) * 500 + abs(p1[1] - p2[1]) * 50
-                    return dist
-                except:
-                    return 0
-
-            distance = get_dist(last_ip, current_ip)
-            
-            # If distance > 100km and speed > 500km/h (300km in 10 mins is impossible)
-            # speed = dist / (time / 60) -> speed = (dist * 60) / time
-            if time_diff_mins > 0:
-                speed = (distance * 60) / time_diff_mins
-                if speed > 800: # Over 800 km/h is "impossible travel" threshold
-                    anomalies.append({
-                        "type": "IMPOSSIBLE_TRAVEL",
-                        "penalty": 25,
-                        "msg": f"Impossible travel detected: {distance}km in {int(time_diff_mins)} mins"
-                    })
-        except:
-            pass
-
+        # Just record that an IP change happened, but don't penalize 
+        # heavily unless we have a real GeoIP DB.
+        pass
+        
     return anomalies
 
 def record_login_event(user_id, ip):

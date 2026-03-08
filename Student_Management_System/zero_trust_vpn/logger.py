@@ -35,14 +35,27 @@ log_lock = threading.Lock()
 _sequence_number = 0
 
 # Load Log Encryption Key
+# Load Log Encryption Key
 LOG_KEY_PATH = os.path.join(BASE_DIR, "keys", "log_key.bin")
-try:
-    with open(LOG_KEY_PATH, "rb") as f:
-        LOG_KEY = f.read()
-    aesgcm = AESGCM(LOG_KEY)
-except FileNotFoundError:
-    LOG_KEY = None
-    print(f"[LOGGER] WARNING: Log encryption key not found at {LOG_KEY_PATH}. Logging in plaintext.")
+
+# 1. Try environment variable first (for Render/Cloud)
+env_key = os.getenv("LOG_KEY")
+if env_key:
+    try:
+        LOG_KEY = base64.b64decode(env_key)
+        aesgcm = AESGCM(LOG_KEY)
+    except Exception as e:
+        print(f"[LOGGER] WARNING: Failed to parse LOG_KEY from env: {e}")
+        LOG_KEY = None
+else:
+    # 2. Fallback to local file
+    try:
+        with open(LOG_KEY_PATH, "rb") as f:
+            LOG_KEY = f.read()
+        aesgcm = AESGCM(LOG_KEY)
+    except FileNotFoundError:
+        LOG_KEY = None
+        print(f"[LOGGER] WARNING: Log encryption key not found. Logging in plaintext.")
 
 # =========================
 # INTERNAL WRITE FUNCTION
