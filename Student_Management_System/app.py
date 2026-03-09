@@ -479,10 +479,10 @@ def parse_log_line(content):
         return {"message": content}
     
     parts = content.split(" | ")
-    data = {"timestamp": parts[0].strip()}
+    data = {}
     
     # Track which parts highlight specific known fields
-    for part in parts[1:]:
+    for part in parts:
         part = part.strip()
         if not part: continue
         
