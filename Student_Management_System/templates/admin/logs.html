@@ -152,6 +152,7 @@
         border-collapse: separate;
         border-spacing: 0;
         font-size: 0.85rem;
+        background-color: transparent !important;
     }
 
     .log-table th {
@@ -169,6 +170,10 @@
         text-shadow: 0 1px 2px rgba(0,0,0,0.5);
     }
 
+    .log-row {
+        background-color: transparent !important;
+    }
+
     .log-row td {
         padding: 12px 20px;
         border-bottom: 1px solid rgba(255,255,255,0.05);
@@ -177,7 +182,7 @@
     }
 
     .log-row:hover {
-        background: rgba(255,255,255,0.08);
+        background-color: rgba(255,255,255,0.08) !important;
     }
 
     .timestamp {
@@ -221,15 +226,20 @@
     }
 
     .reason-note {
-        font-size: 0.75rem;
-        color: #94a3b8;
-        font-style: italic;
-        padding-top: 2px;
+        font-size: 0.85rem;
+        color: #cbd5e1;
+        font-style: normal;
+        font-weight: 500;
+        padding-top: 4px;
+        display: block;
     }
 
     .message-text {
-        color: #f1f5f9;
-        font-weight: 400;
+        color: #ffffff;
+        font-weight: 500;
+        font-size: 0.95rem;
+        display: block;
+        margin-top: 2px;
     }
 
     /* Trust Score UI */

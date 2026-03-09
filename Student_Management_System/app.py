@@ -11,7 +11,7 @@ import sqlite3
 import secrets
 import hashlib
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import Flask, render_template, request, session, redirect, url_for, flash, g
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -356,6 +356,53 @@ def init_db():
     """
     conn.executescript(schema)
     
+    # Ensure trust_history only keeps latest 50 entries
+    if current_is_postgres:
+        try:
+            conn.execute("""
+            CREATE OR REPLACE FUNCTION limit_trust_history()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                DELETE FROM trust_history
+                WHERE id NOT IN (
+                    SELECT id FROM trust_history
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT 50
+                );
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """)
+            conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_limit_trust_history') THEN
+                    CREATE TRIGGER trg_limit_trust_history
+                    AFTER INSERT ON trust_history
+                    FOR EACH STATEMENT
+                    EXECUTE FUNCTION limit_trust_history();
+                END IF;
+            END
+            $$;
+            """)
+            conn.commit()
+        except Exception as e:
+            print(f"[WARN] Failed to create Postgres trigger for trust_history: {e}")
+    else:
+        try:
+            conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS limit_trust_history 
+            AFTER INSERT ON trust_history
+            BEGIN
+                DELETE FROM trust_history WHERE id NOT IN (
+                    SELECT id FROM trust_history ORDER BY timestamp DESC, id DESC LIMIT 50
+                );
+            END;
+            """)
+            conn.commit()
+        except Exception as e:
+            print(f"[WARN] Failed to create SQLite trigger for trust_history: {e}")
+    
     # Check if we need a default admin
     existing = conn.fetchone("SELECT COUNT(*) as count FROM users")["count"]
     if existing == 0:
@@ -547,9 +594,15 @@ def get_decrypted_log_entries(log_type="session", limit=100):
             # Parse the actual log content (remains same logic)
             parsed = parse_log_line(content)
             entry_data.update(parsed)
-            # Ensure timestamp from DB is used if parse_log_line didn't find one
-            if "timestamp" not in entry_data or not entry_data["timestamp"]:
-                entry_data["timestamp"] = row["timestamp"]
+            # Format timestamp properly to local time
+            try:
+                if entry_data.get('timestamp'):
+                    dt = datetime.fromisoformat(entry_data['timestamp'].replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    entry_data['timestamp'] = dt.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
             
             entries.append(entry_data)
         except Exception as e:
@@ -2524,9 +2577,52 @@ def admin_logs():
         for r in rows:
             entry = dict(r)
             entry['decision'] = 'ALLOW' if entry['allowed'] else 'DENY'
+            
+            # Format timestamp properly
+            try:
+                if entry.get('timestamp'):
+                    dt = datetime.fromisoformat(str(entry['timestamp']).replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    entry['timestamp'] = dt.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+                
             logs.append(entry)
             
         return render_template("admin/logs.html", logs=logs, type='database', trust_score=session.get("trust_score", 100))
+    elif log_type == 'security':
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT th.*, u.username, u.role, u.trust_score 
+            FROM trust_history th 
+            LEFT JOIN users u ON th.user_id = u.id 
+            ORDER BY th.timestamp DESC LIMIT 100
+        """).fetchall()
+        
+        logs = []
+        for r in rows:
+            entry = dict(r)
+            # Format timestamp properly
+            try:
+                if entry.get('timestamp'):
+                    dt = datetime.fromisoformat(str(entry['timestamp']).replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    entry['timestamp'] = dt.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+            
+            entry['action'] = 'Trust Adjustment'
+            entry['decision'] = 'ALERT' if entry.get('new_score', 0) < entry.get('old_score', 0) else 'INFO'
+            entry['message'] = f"Score: {entry.get('old_score', '?')} → {entry.get('new_score', '?')}"
+            entry['trust'] = entry.get('new_score', entry.get('trust_score', 100))
+            entry['encrypted'] = False 
+            entry['resource'] = 'trust_history' # Explicitly reference the table
+            logs.append(entry)
+            
+        track_behavior("admin_logs_security")
+        return render_template("admin/logs.html", decrypted_logs=logs, type=log_type, trust_score=session.get("trust_score", 100))
     else:
         # Fetch from encrypted files
         entries = get_decrypted_log_entries(log_type)
