@@ -1824,9 +1824,9 @@ def student_marks():
 
     # Fetch detailed marks from the 'marks' table
     detailed_marks = conn.execute("""
-        SELECT m.*, u.name as faculty_name 
+        SELECT m.*, COALESCE(u.name, 'N/A') as faculty_name 
         FROM marks m 
-        JOIN users u ON m.entered_by = u.id
+        LEFT JOIN users u ON m.entered_by = u.id
         WHERE m.student_id=? 
         ORDER BY m.entered_at DESC
     """, (student["id"],)).fetchall()
@@ -1982,34 +1982,7 @@ def student_profile():
     track_behavior("view_profile")
     return render_template("student/profile.html", user=user, student=student, pending_requests=pending_requests)
 
-@app.route('/student/request_change', methods=['POST'])
-@login_required
-@role_required(['student'])
-def student_request_change():
-    uid = session["user_id"]
-    field_name = request.form.get("field_name")
-    new_value = request.form.get("new_value")
-    
-    if not field_name or not new_value:
-        flash("Invalid request.", "danger")
-        return redirect(url_for("student_profile"))
-    
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-    trust_score = user["trust_score"] if user["trust_score"] else 100
-    
-    old_value = user[field_name] if field_name in dict(user).keys() else ""
-    
-    conn.execute("""INSERT INTO profile_change_requests 
-                   (student_id, field_name, old_value, new_value, trust_score, requested_at) 
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (uid, field_name, old_value, new_value, trust_score, datetime.utcnow().isoformat()))
-    conn.commit()
-    
-    write_access_log(conn, uid, "profile_change_request", "user", None, True, f"requested_{field_name}")
-    log_action(f"Profile change requested by user {uid}: {field_name}")
-    flash("Change request submitted. Awaiting admin approval.", "success")
-    return redirect(url_for("student_profile"))
+
 
 # =============================================================================
 # ROUTES - PARENT PORTAL
@@ -2552,6 +2525,11 @@ def admin_handle_request(request_id, action):
         
         if field in ['email', 'phone', 'name']:
             conn.execute(f"UPDATE users SET {field}=? WHERE id=?", (new_value, student_id))
+            
+            # If email changed, clear TOTP secret so user must re-enroll with new email
+            if field == 'email':
+                conn.execute("UPDATE users SET totp_secret=NULL WHERE id=?", (student_id,))
+                log_action(f"TOTP_RESET | User ID {student_id} email changed — TOTP secret cleared")
         
         conn.execute("UPDATE profile_change_requests SET status='approved', reviewed_by=?, reviewed_at=? WHERE id=?",
                     (session["user_id"], datetime.utcnow().isoformat(), request_id))
@@ -2848,79 +2826,76 @@ def enroll_student():
     return render_template("admin/enroll_student.html", classes=classes, students=students)
 
 # NEWLY ADDED
-def create_change_request(student_id, field, new_value):
+def create_change_request(student_id, field, new_value, old_value="", trust_score=100):
     conn = get_db()
 
     conn.execute("""
         INSERT INTO profile_change_requests 
-        (student_id, field_name, new_value)
-        VALUES (?, ?, ?)
-    """, (student_id, field, new_value))
+        (student_id, field_name, old_value, new_value, trust_score, requested_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (student_id, field, old_value, new_value, trust_score, datetime.utcnow().isoformat()))
 
     conn.commit()
 
-@app.route('/student/send-profile-otp', methods=['POST'])
+@app.route('/student/request-profile-change', methods=['POST'])
 @login_required
 @role_required(['student'])
-def send_profile_otp():
-    import random
-    from datetime import datetime, timedelta
-
-    otp = random.randint(100000, 999999)
-
-    session['profile_change_otp'] = otp
-    session['otp_expiry'] = (datetime.now() + timedelta(minutes=5)).isoformat()
-    session['pending_field'] = request.form['field_name']
-    session['pending_value'] = request.form['new_value']
-
-    print("OTP for profile change:", otp)
-
-    flash('OTP generated. Check console for demo.', 'info')
-
+def request_profile_change():
+    """Verify TOTP and submit profile change request in one step."""
     uid = session["user_id"]
-    conn = get_db()
+    field_name = request.form.get("field_name", "").strip()
+    new_value = request.form.get("new_value", "").strip()
+    totp_code = request.form.get("totp_code", "").strip()
 
-    user = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-    student = conn.execute("SELECT * FROM students WHERE user_id=?", (uid,)).fetchone()
-    pending_requests = conn.execute("""
-        SELECT * FROM profile_change_requests 
-        WHERE student_id=? AND status='pending'
-        ORDER BY requested_at DESC
-    """, (uid,)).fetchall()
-
-    return render_template(
-        "student/profile.html",
-        user=user,
-        student=student,
-        pending_requests=pending_requests,
-        otp_sent=True
-    )
-
-@app.route('/student/verify-profile-otp', methods=['POST'])
-def verify_profile_otp():
-    entered_otp = request.form['otp']
-
-    if str(session.get('profile_change_otp')) != entered_otp:
-        reduce_trust("invalid_otp", 10)
-        flash("Invalid OTP. Trust score reduced.", "trust_alert")
+    if not field_name or not new_value or not totp_code:
+        flash("All fields are required including TOTP code.", "danger")
         return redirect(url_for("student_profile"))
 
+    if field_name not in ['email', 'phone']:
+        flash("Invalid field.", "danger")
+        return redirect(url_for("student_profile"))
 
-    if datetime.fromisoformat(session['otp_expiry']) < datetime.now():
-        flash('OTP expired.', 'danger')
-        return redirect(url_for('student_profile'))
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
 
-    # Save request
+    if not user:
+        flash("User not found.", "danger")
+        return redirect(url_for("student_profile"))
+
+    # Verify TOTP code
+    totp_secret = None
+    try:
+        totp_secret = user["totp_secret"]
+    except (IndexError, KeyError):
+        pass
+
+    if not totp_secret:
+        flash("TOTP not enrolled. Please contact admin.", "danger")
+        return redirect(url_for("student_profile"))
+
+    totp = pyotp.TOTP(totp_secret)
+    if not totp.verify(totp_code):
+        reduce_trust("invalid_totp_profile_change", 10)
+        flash("Invalid TOTP code. Trust score reduced.", "trust_alert")
+        log_action(f"PROFILE_CHANGE_FAILED | User: {user['username']} | Invalid TOTP for {field_name}")
+        return redirect(url_for("student_profile"))
+
+    # TOTP verified — create the change request
+    trust_score = user["trust_score"] if user["trust_score"] else 100
+    old_value = user[field_name] if field_name in dict(user).keys() else ""
+
     create_change_request(
-        student_id=session['user_id'],
-        field=session['pending_field'],
-        new_value=session['pending_value']
+        student_id=uid,
+        field=field_name,
+        new_value=new_value,
+        old_value=old_value,
+        trust_score=trust_score
     )
 
-    session.pop('profile_change_otp', None)
-
-    flash('Profile change request submitted successfully.', 'success')
-    return redirect(url_for('student_profile'))
+    write_access_log(conn, uid, "profile_change_request", "user", None, True, f"requested_{field_name}")
+    log_action(f"Profile change requested by user {uid}: {field_name} (TOTP verified)")
+    flash("Profile change request submitted successfully.", "success")
+    return redirect(url_for("student_profile"))
 
 # =============================================================================
 # ASSIGNMENT HUB ROUTES

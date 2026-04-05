@@ -38,7 +38,7 @@
                         <td>{{ mark.max_marks }}</td>
                         <td><span class="btn-sm btn-info">{{ mark.exam_type }}</span></td>
                         <td>{{ mark.faculty_name }}</td>
-                        <td>{{ mark.entered_at[:10] }}</td>
+                        <td>{{ mark.entered_at[:10] if mark.entered_at else 'N/A' }}</td>
                     </tr>
                     {% else %}
                     <tr>

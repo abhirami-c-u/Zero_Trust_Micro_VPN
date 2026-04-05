@@ -24,39 +24,36 @@
         </div>
     </div>
 
-   <div class="form-card">
-    <h3>Request Profile Change (OTP Verification)</h3>
+    <div class="form-card">
+        <h3>🔐 Request Profile Change (TOTP Verification)</h3>
+        <p style="margin-bottom: 15px; color: var(--text-muted); font-size: 0.9rem;">
+            Enter your Google Authenticator code to verify this request.
+        </p>
 
-    <form method="post" action="{{ url_for('send_profile_otp') }}">
-        <div class="form-group">
-            <label>Field</label>
-            <select name="field_name" required>
-                <option value="email">Email</option>
-                <option value="phone">Phone</option>
-            </select>
-        </div>
+        <form method="post" action="{{ url_for('request_profile_change') }}">
+            <div class="form-group">
+                <label>Field to Change</label>
+                <select name="field_name" required>
+                    <option value="email">Email</option>
+                    <option value="phone">Phone</option>
+                </select>
+            </div>
 
-        <div class="form-group">
-            <label>New Value</label>
-            <input type="text" name="new_value" required>
-        </div>
+            <div class="form-group">
+                <label>New Value</label>
+                <input type="text" name="new_value" required placeholder="Enter new value">
+            </div>
 
-        <button class="btn btn-secondary">Send OTP</button>
-    </form>
+            <div class="form-group">
+                <label>TOTP Code (Google Authenticator)</label>
+                <input type="text" name="totp_code" required
+                       inputmode="numeric" maxlength="6" pattern="[0-9]{6}"
+                       placeholder="Enter 6-digit code" autocomplete="one-time-code">
+            </div>
 
-    {% if otp_sent %}
-    <hr>
-
-    <form method="post" action="{{ url_for('verify_profile_otp') }}">
-        <div class="form-group">
-            <label>Enter OTP</label>
-            <input type="text" name="otp" required>
-        </div>
-
-        <button class="btn btn-primary">Verify & Submit</button>
-    </form>
-    {% endif %}
-</div>
+            <button class="btn btn-primary">Verify & Submit Request</button>
+        </form>
+    </div>
 
     {% if pending_requests %}
     <div class="card">
