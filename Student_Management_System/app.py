@@ -1986,6 +1986,25 @@ def pay_fees():
     
     return redirect(url_for("student_fees"))
 
+@app.route('/student/receipt/<txn_id>')
+@login_required
+@role_required(['student'])
+def download_receipt(txn_id):
+    uid = session["user_id"]
+    conn = get_db()
+    student = conn.execute("SELECT * FROM students WHERE user_id=?", (uid,)).fetchone()
+    if not student:
+        flash("Record not found.", "danger")
+        return redirect(url_for("dashboard"))
+        
+    payment = conn.execute("SELECT * FROM fee_payments WHERE transaction_id=? AND student_id=?", (txn_id, student["id"])).fetchone()
+    
+    if not payment:
+        flash("Transaction not found.", "danger")
+        return redirect(url_for("student_fees"))
+        
+    return render_template("student/receipt.html", payment=payment, student=student)
+
 @app.route('/student/notices')
 @login_required
 @role_required(['student'])

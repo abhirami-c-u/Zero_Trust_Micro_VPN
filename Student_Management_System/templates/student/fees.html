@@ -59,7 +59,7 @@
                 Securely pay your pending fees. Requires Zero-Trust TOTP.
             </p>
 
-            <form method="post" action="{{ url_for('pay_fees') }}">
+            <form id="paymentForm" method="post" action="{{ url_for('pay_fees') }}">
                 <div class="form-group">
                     <label>Amount (₹)</label>
                     <input type="number" name="amount" required placeholder="Ex: 50000" min="1" max="{{ fees_due }}" step="0.01">
@@ -122,10 +122,9 @@
                             <td><span class="btn-sm btn-secondary" style="background-color: #e2e8f0; color: #475569; border: none;">{{ p.payment_method }}</span></td>
                             <td><span class="status-badge status-pass">Success</span></td>
                             <td>
-                                <!-- Mock Download Receipt -->
-                                <button onclick="alert('Downloading Receipt for TXN {{ p.transaction_id }}...')" style="background: none; border: none; color: var(--primary); cursor: pointer; text-decoration: underline;">
+                                <a href="{{ url_for('download_receipt', txn_id=p.transaction_id) }}" target="_blank" style="background: none; border: none; color: var(--primary); cursor: pointer; text-decoration: underline;">
                                     <i class="fa-solid fa-download"></i> PDF
-                                </button>
+                                </a>
                             </td>
                         </tr>
                         {% else %}
@@ -144,4 +143,52 @@
 
     </div>
 </div>
+
+<!-- Mock UPI Modal -->
+<div id="upiModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; text-align: center; max-width: 350px; width: 90%;">
+        <h3 style="margin-top: 0; color: var(--primary);">Scan to Pay</h3>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">Open your UPI app and scan this (mock) QR code.</p>
+        
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <!-- Placeholder for a QR code. Using a font-awesome icon to mimic a QR frame -->
+            <i class="fa-solid fa-qrcode" style="font-size: 8rem; color: #333;"></i>
+            <p style="margin-top: 15px; font-weight: bold;" id="upiAmountText">₹0</p>
+        </div>
+        
+        <div style="display: flex; gap: 10px;">
+            <button type="button" class="btn btn-secondary" style="flex: 1;" onclick="document.getElementById('upiModal').style.display='none'">Cancel</button>
+            <button type="button" class="btn btn-primary" style="flex: 1;" id="confirmUpiBtn">Simulate Scan</button>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const paymentForm = document.getElementById("paymentForm");
+    
+    if (paymentForm) {
+        paymentForm.addEventListener("submit", function(e) {
+            const method = this.elements["payment_method"].value;
+            const amount = this.elements["amount"].value;
+            
+            if (method === "UPI") {
+                e.preventDefault(); // Stop standard form submission
+                
+                // Show modal
+                document.getElementById('upiAmountText').innerText = '₹' + amount;
+                document.getElementById('upiModal').style.display = 'flex';
+                
+                // When button is clicked
+                document.getElementById('confirmUpiBtn').onclick = function() {
+                    document.getElementById('upiModal').style.display = 'none';
+                    // Programmatically submit the form (bypasses the submit event listener)
+                    paymentForm.submit();
+                };
+            }
+        });
+    }
+});
+</script>
+
 {% endblock %}
