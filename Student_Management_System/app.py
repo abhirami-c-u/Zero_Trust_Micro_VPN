@@ -1351,6 +1351,30 @@ def vpn_tunnel():
     if not jwt_token:
         return  # Not logged in — @login_required handles the redirect
 
+    # Automatic JWT Reissue (Proactive Refresh)
+    try:
+        payload = jwt.decode(jwt_token, options={"verify_signature": False})
+        exp_time = payload.get("exp", 0)
+        now = datetime.utcnow().timestamp()
+        
+        # Reissue if expiring in less than 15 minutes (900 seconds) or already expired
+        if exp_time - now < 900:
+            # Check if trust score is too low before granting a new token
+            if session.get("trust_score", 100) >= 30:
+                new_payload = {
+                    "sub": session.get("username"),
+                    "role": session.get("role"),
+                    "exp": datetime.utcnow() + timedelta(hours=2)
+                }
+                new_token = jwt.encode(new_payload, JWT_SECRET, algorithm="HS256")
+                session["jwt"] = new_token
+                jwt_token = new_token
+                print(f"[AUTH] Automatically reissued JWT for {session.get('username')}")
+            else:
+                print(f"[AUTH] Skipped JWT reissue for {session.get('username')} due to low trust score.")
+    except Exception as e:
+        print(f"[AUTH] Could not check/reissue JWT: {e}")
+
     if _VPN_PUBLIC_KEY is None:
         flash("Security Error: VPN keys not generated. Run generate_keys.py.", "danger")
         return redirect(url_for("login"))
