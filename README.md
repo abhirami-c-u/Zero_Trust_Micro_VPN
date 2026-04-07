@@ -1,6 +1,3 @@
-Here is a clean, professional **GitHub README (no emojis, proper formatting)** with your deployed link included:
-
----
 
 # Zero Trust Micro-VPN for Campus Networks
 
@@ -180,8 +177,6 @@ http://127.0.0.1:5000
 
 Guide: Mr. Sandy Joseph
 
----
 
 
 
-If you want, I can also make a **short 1-page recruiter-friendly README** or add a **project architecture diagram section** for GitHub.
